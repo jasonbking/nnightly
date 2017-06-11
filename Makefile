@@ -18,7 +18,13 @@ CFLAGS = -std=c99
 PROG = nnightly
 RM = /bin/rm
 
+SRCS = nnightly.c filter.c format.c util.c
+OBJS = $(SRCS:%.c=%.o)
+
 all: nnightly
-nnightly: nnightly.c
+
+nnightly: $(OBJS)
+	$(LINK.c) -o $@ $(OBJS)
+
 clean:
-	rm -f $(PROG)
+	rm -f $(PROG) $(OBJS)
