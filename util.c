@@ -14,6 +14,8 @@
  */
 
 #include <string.h>
+#include <err.h>
+#include <stdlib.h>
 #include "util.h"
 
 boolean_t
@@ -46,5 +48,15 @@ skip_whitespace(const char *p)
 		p++;
 	}
 
+	return (p);
+}
+
+void *
+zalloc(size_t amt)
+{
+	void *p = calloc(1, amt);
+
+	if (p == NULL)
+		err(EXIT_FAILURE, "calloc");
 	return (p);
 }

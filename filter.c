@@ -53,7 +53,7 @@ filter_errors(void *arg)
 		linenum++;
 
 		if (!save) {
-			if (strstr(line, "dev --> Job output") == line) {
+			if (strstr(line, " --> Job output") != NULL) {
 				save = B_TRUE;
 				saw_error = B_FALSE;
 				save_line(&buf, line, linenum);
@@ -65,7 +65,7 @@ filter_errors(void *arg)
 		    (strstr(line, "ignored") == NULL))
 			saw_error = B_TRUE;
 
-		if (strstr(line, "dev -->") == line ||
+		if (strstr(line, " --> Job output") != NULL ||
 		    strstr(line, "==== Ended") == line) {
 			if (saw_error)
 				dump_lines(&buf, opts->out, opts->filename);
