@@ -24,51 +24,14 @@
 #include "format.h"
 #include "util.h"
 
-enum {
-	SINGLE_LINE,
-	GROUP
-};
-
-struct rules {
-	const char *prefix;
-	int action;
-};
-
-struct format_common {
-	FILE *out;
-	const struct rules *rules;
-	size_t nrules;
-	size_t cols;
-	size_t last;
-	int indent;
-};
-
-static struct rules cc_rules[] = {
-	{ "-D", SINGLE_LINE },
-	{ "-I", SINGLE_LINE },
-	{ "-L", SINGLE_LINE },
-	{ "-f", GROUP },
-	{ "-W", GROUP }
-};
-
-static struct rules lint_rules[] = {
-	{ "-D", SINGLE_LINE },
-	{ "-I", SINGLE_LINE },
-	{ "-erroff", SINGLE_LINE }
-};
-
 static void format_cmd(struct format_opts *, char **);
 static void format_cc(struct format_opts *, char **);
 static void format_lint(struct format_opts *, char **);
-static void format_common(struct format_common *, const char *, size_t *,
-    boolean_t);
-static void format_common_init(struct format_common *, struct format_opts *,
-    const struct rules *, size_t);
 static size_t writef(FILE *, const char *, ...);
 static void newline(FILE *, size_t *);
-static size_t indent(FILE *, int);
-
-#define	CHUNK_SZ (64)
+static size_t pad(FILE *, int);
+static inline boolean_t fits(const char *, size_t, size_t);
+static size_t nextline(FILE *, char **, size_t *);
 
 void *
 format_output(void *arg)
@@ -76,12 +39,9 @@ format_output(void *arg)
 	struct format_opts *opts = arg;
 	char *line = NULL;
 	size_t linesz = 0;
-	ssize_t n = 0;
+	size_t n = 0;
 
-	while ((n = getline(&line, &linesz, opts->in)) > 0) {
-		if (line[n - 1] == '\n')
-			line[n - 1] = '\0';
-
+	while ((n = nextline(opts->in, &line, &linesz)) > 0) {
 		char **words = split_lines(line);
 
 		if (words == NULL || words[0] == NULL) {
@@ -118,24 +78,22 @@ format_output(void *arg)
 	return (NULL);
 }
 
+/* TODO: better splitting of lines using ; */
 static void
 format_cmd(struct format_opts *opts, char **words)
 {
 	size_t pos = 0;
 
 	for (size_t i = 0; words[i] != NULL; i++) {
-		size_t len = strlen(words[i]);
-
 		if (i == 0) {
 			pos = writef(opts->out, "%s", words[0]);
 			continue;
 		}
 
-		if ((len + opts->indent < opts->cols) &&
-		    (pos + len + 2 > opts->cols))
+		if (!fits(words[i], pos, opts->cols))
 			newline(opts->out, &pos);
 
-		pos += indent(opts->out, (pos == 0) ? opts->indent : 1);
+		pos += pad(opts->out, (pos == 0) ? opts->indent : 1);
 		pos += writef(opts->out, "%s", words[i]);
 
 		if (feof(opts->out))
@@ -154,14 +112,12 @@ format_cc(struct format_opts *opts, char **words)
 	boolean_t Wflag = B_FALSE;
 
 	for (size_t i = 0; words[i] != NULL; i++) {
-		size_t len = strlen(words[i]);
-
 		if (i == 0) {
 			pos = writef(opts->out, "%s", words[0]);
 			continue;
 		}
 
-		if (pos + len + 2 > opts->cols)
+		if (!fits(words[i], pos, opts->cols))
 			newline(opts->out, &pos);
 
 		/* put these on their own lines */
@@ -191,7 +147,7 @@ format_cc(struct format_opts *opts, char **words)
 			Wflag = B_FALSE;
 		}
 
-		pos += indent(opts->out, (pos == 0) ? opts->indent : 1);
+		pos += pad(opts->out, (pos == 0) ? opts->indent : 1);
 		pos += writef(opts->out, "%s", words[i]);
 
 		if (own_line) {
@@ -209,80 +165,125 @@ format_cc(struct format_opts *opts, char **words)
 static void
 format_lint(struct format_opts *opts, char **words)
 {
-	size_t width = 0;
+	size_t pos = 0;
+	boolean_t own_line = B_FALSE;
 
 	for (size_t i = 0; words[i] != NULL; i++) {
-		size_t len = strlen(words[i]);
-		int n = 0;
-
-		if ((width > 0) && (width + len + 2 > opts->cols)) {
-			(void) fprintf(opts->out, " \\\n");
-			width = 0;
+		if (i == 0) {
+			pos = writef(opts->out, "%s", words[0]);
+			continue;
 		}
 
-		if (width == 0) {
-			if (i > 0) {
-				n = fprintf(opts->out, "%.*s", opts->indent,
-				    "");
-				if (n < 0)
-					err(EXIT_FAILURE, "fprintf");
-				width += n;
-			}
-		} else {
-			(void) fputc(' ', opts->out);
-			width++;
+		if (!fits(words[i], pos, opts->cols))
+			newline(opts->out, &pos);
+
+		if (starts_with(words[i], "-I") ||
+		    starts_with(words[i], "-D")) {
+			newline(opts->out, &pos);
+			own_line = B_TRUE;
 		}
 
-		n = fprintf(opts->out, "%s", words[i]);
-		if (n < 0)
-			err(EXIT_FAILURE, "fprintf");
-		width += n;
+		pos += pad(opts->out, (pos == 0) ? opts->indent : 1);
+		pos += writef(opts->out, "%s", words[i]);
+
+		if (own_line) {
+			newline(opts->out, &pos);
+			own_line = B_FALSE;
+		}
+
+		if (feof(opts->out))
+			return;
 	}
 
-	(void) fputc('\n', opts->out);
+	(void) writef(opts->out, "\n");
 }
 
-static void
-format_common(struct format_common *fc, const char *word, size_t *col,
-    boolean_t firstword)
+/* like getline, but will concatenate continuation lines together */
+#define	LINE_SZ	(128)
+static size_t
+nextline(FILE *f, char **line, size_t *len)
 {
-	size_t i = 0;
+	char *p = NULL;
+	size_t n = 0;
+	size_t size = 0;
+	int c = -1;
+	boolean_t slash = B_FALSE;	/* he is real */
 
-	if (firstword)
-		fc->last = fc->nrules;
+	if (*line == NULL || *len < LINE_SZ) {
+		if ((*line = realloc(*line, LINE_SZ)) == NULL)
+			err(EXIT_FAILURE, "out of memory");
+		*len = LINE_SZ;
+	}
 
-	for (size_t i = 0; i < fc->nrules; i++) {
-		if (starts_with(word, fc->rules[i].prefix))
+	size = *len;
+	p = *line;
+
+	while (1) {
+		if ((c = getc_unlocked(f)) == EOF)
 			break;
-	}
-	if (fc->last == fc->nrules)
-		return;
 
-	switch (fc->rules[i].action) {
-	case SINGLE_LINE:
-		newline(fc->out, col);
-		break;
-	case GROUP:
-		if (fc->last != i)
-			newline(fc->out, col);
-		break;
-	default:
-		abort();
+		*p++ = c;
+		if (++n == size) {
+			if ((*line = realloc(*line, size * 2)) == NULL)
+				err(EXIT_FAILURE, "out of memory");
+
+			p = *line;
+			p += size;
+			*len = size = 2 * size;
+		}
+
+		switch (c) {
+		case '\n':
+			if (slash) {
+				p -= 2;
+				n -= 2;
+				*p = '\0';
+				slash = B_FALSE;
+				continue;
+			}
+			goto done;
+		case '\\':
+			slash = B_TRUE;
+			break;
+		default:
+			slash = B_FALSE;
+		}
 	}
-	fc->last = i;
+
+done:
+	/* don't save trailing \n */
+	if (c == '\n')
+		p--;
+
+	*p = '\0';
+	return (n);
 }
 
+/* Will it blen^Wwrap? */
+static inline boolean_t
+fits(const char *word, size_t pos, size_t width)
+{
+	size_t len = strlen(word);
+
+	if (pos + strlen(word) + 2 <= width)
+		return (B_TRUE);
+	return (B_FALSE);
+}
+
+/* wrap stdio functions and let them handle errors */
 static void
 newline(FILE *out, size_t *pos)
 {
-	if (*pos > 0) {
-		(void) fprintf(out, " \\\n");
-		*pos = 0;
-	}
+	if (*pos == 0)
+		return;
+
+	if (fprintf(out, " \\\n") < 0 && ferror(out))
+		err(EXIT_FAILURE, "fprintf");
+	*pos = 0;
 }
 
 static size_t
-indent(FILE *out, int amt)
+pad(FILE *out, int amt)
 {
 	int n = fprintf(out, "%*s", amt, "");
 
@@ -311,14 +312,4 @@ writef(FILE *out, const char *fmt, ...)
 		err(EXIT_FAILURE, "fprintf");
 	}
 	return ((size_t)n);
-}
-
-static void
-format_common_init(struct format_common *fc, struct format_opts *opts,
-    const struct rules *rules, size_t nrules)
-{
-	fc->out = opts->out;
-	fc->nrules = fc->last = nrules;
-	fc->indent = opts->indent;
-	fc->cols = opts->cols;
 }

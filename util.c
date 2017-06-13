@@ -18,7 +18,7 @@
 #include <stdlib.h>
 #include "util.h"
 
-#define	CHUNK_SZ	(8)
+#define	CHUNK_SZ	(32)
 
 boolean_t
 starts_with(const char *word, const char *str)
