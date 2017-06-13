@@ -25,6 +25,7 @@ extern "C" {
 boolean_t starts_with(const char *, const char *);
 boolean_t ends_with(const char *, const char *);
 const char *skip_whitespace(const char *);
+char **split_lines(const char *);
 void *zalloc(size_t);
 
 #ifdef __cplusplus

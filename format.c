@@ -64,7 +64,6 @@ static void format_common(struct format_common *, const char *, size_t *,
     boolean_t);
 static void format_common_init(struct format_common *, struct format_opts *,
     const struct rules *, size_t);
-static char **split_lines(const char *);
 static size_t writef(FILE *, const char *, ...);
 static void newline(FILE *, size_t *);
 static size_t indent(FILE *, int);
@@ -271,92 +270,6 @@ format_common(struct format_common *fc, const char *word, size_t *col,
 		abort();
 	}
 	fc->last = i;
-}
-
-/* Try to split honoring shell-like quoting */		
-static char **
-split_lines(const char *line)
-{
-	const char *p = line;
-	const char *start = NULL;
-	char **words = NULL;
-	size_t words_alloc = 0;
-	size_t words_n = 0;
-	size_t len = 0;
-	boolean_t in_space = B_TRUE;
-	boolean_t quote = B_FALSE;
-	boolean_t dquote = B_FALSE;
-	boolean_t litnext = B_FALSE;
-
-	while (*p != '\0') {
-		p = skip_whitespace(p);
- 		if (p == '\0')
-			break;
-
-		quote = dquote = B_FALSE;
-		start = p;
-
-		if (words_n + 2 >= words_alloc) {
-			char **temp = NULL;
-			size_t newlen = words_alloc + CHUNK_SZ;
-
-			temp = realloc(words, newlen * sizeof (char *));
-			if (temp == NULL)
-				err(EXIT_FAILURE, "realloc");
-
-			words = temp;
-			words_alloc = newlen;
-		}
-
-		while (*p != '\0') {
-			if (quote) {
-				if (*p == '\'')
-					quote = B_FALSE;
-				p++;
-				continue;
-			}
-
-			if (litnext) {
-				litnext = B_FALSE;
-				p++;
-				continue;
-			}
-
-			if (dquote) {
-				if (*p == '"')
-					dquote = B_FALSE;
-				p++;
-				continue;
-			}
-
-			switch (*p) {
-			case '\'':
-				quote = B_TRUE;
-				break;
-			case '"':
-				dquote = B_TRUE;
-				break;
-			case '\\':
-				litnext = B_TRUE;
-				break;
-			}
-
-			if (*p == ' ' || *p == '\t')
-				break;
-			p++;
-		}
-
-		len = (size_t)(p - start) + 1;
-		if ((words[words_n] = calloc(1, len)) == NULL)
-			err(EXIT_FAILURE, "calloc");
-
-		(void) strncpy(words[words_n++], start, len - 1);
-	}
-
-	if (words_n > 0)
-		words[words_n] = NULL;
-
-	return (words);
 }
 
 static void
